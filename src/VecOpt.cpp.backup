@@ -1,0 +1,216 @@
+#include "llvm/IR/PassManager.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/PassPlugin.h"
+
+#include "llvm/Analysis/LoopAnalysisManager.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/IR/IRBuilder.h"
+
+// ... all your #includes here ...
+#include "llvm/IR/IRBuilder.h"
+
+// <<< --- START: ADD THIS CANARY CODE --- >>>
+// This is a "canary" to test if the shared library is being loaded at all.
+// The constructor of a static global object is executed when the library is loaded.
+struct Canary {
+  Canary() {
+    llvm::errs() << "\n\n[CANARY] >>> PLUGIN .SO FILE LOADED SUCCESSFULLY! <<<\n\n";
+  }
+};
+static Canary TheCanary;
+// <<< ---  END: ADD THIS CANARY CODE  --- >>>
+
+using namespace llvm;
+
+// ... the rest of your code (cl::opt, printLoc, etc.)
+
+using namespace llvm;
+
+static cl::opt<bool> EnableRewrite(
+    "vecopt-rewrite",
+    cl::desc("Enable the rewrite mode for VecOpt"),
+    cl::init(false)
+);
+
+static void printLoc(const StringRef Fn, const Instruction &I) {
+  if (auto DL = I.getDebugLoc()) {
+    errs() << "[VecOpt][diagnose] " << Fn
+           << " @ " << DL->getFilename() << ":" << DL->getLine() << ": ";
+  } else {
+    errs() << "[VecOpt][diagnose] " << Fn << ": ";
+  }
+}
+
+static bool isSideEffectFree(const BasicBlock *BB) {
+  for (const Instruction &I : *BB) {
+    if (I.isTerminator() || isa<PHINode>(&I)) continue;
+    if (isa<StoreInst>(&I) || isa<FenceInst>(&I) || isa<AtomicRMWInst>(&I) || I.isVolatile())
+      return false;
+    if (auto *CB = dyn_cast<CallBase>(&I)) {
+      if (!(CB->onlyReadsMemory() || CB->doesNotAccessMemory()))
+        return false;
+    }
+    if (!isSafeToSpeculativelyExecute(&I)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Instrumented findDiamond from the previous step
+static bool findDiamond(BranchInst *Br,
+                        BasicBlock *&ThenBB, BasicBlock *&ElseBB,
+                        BasicBlock *&MergeBB, PHINode *&Phi) {
+  errs() << "[Debug]   -> Calling findDiamond...\n";
+  if (!Br || !Br->isConditional()) {
+    errs() << "[Debug]   -> findDiamond: FAILED - Branch is not conditional.\n";
+    return false;
+  }
+  ThenBB = Br->getSuccessor(0);
+  ElseBB = Br->getSuccessor(1);
+  auto *ThenTerm = dyn_cast<BranchInst>(ThenBB->getTerminator());
+  auto *ElseTerm = dyn_cast<BranchInst>(ElseBB->getTerminator());
+  if (!ThenTerm || !ElseTerm) {
+    errs() << "[Debug]   -> findDiamond: FAILED - A successor's terminator is not a BranchInst.\n";
+    return false;
+  }
+  if (ThenTerm->isConditional() || ElseTerm->isConditional()) {
+    errs() << "[Debug]   -> findDiamond: FAILED - A successor's branch is conditional.\n";
+    return false;
+  }
+  if (ThenTerm->getSuccessor(0) != ElseTerm->getSuccessor(0)) {
+    errs() << "[Debug]   -> findDiamond: FAILED - Successors do not merge.\n";
+    return false;
+  }
+  MergeBB = ThenTerm->getSuccessor(0);
+  Phi = nullptr;
+  for (Instruction &I : *MergeBB) {
+    if (auto *P = dyn_cast<PHINode>(&I)) {
+      if (P->getBasicBlockIndex(ThenBB) >= 0 && P->getBasicBlockIndex(ElseBB) >= 0) {
+        Phi = P;
+        errs() << "[Debug]   -> findDiamond: SUCCESS - Found matching PHI node!\n";
+        return true;
+      }
+    } else {
+      break;
+    }
+  }
+  errs() << "[Debug]   -> findDiamond: FAILED - No suitable PHI node found.\n";
+  return false;
+}
+
+static void doIfConversion(BranchInst *Br, PHINode *Phi) {
+    IRBuilder<> Builder(Br);
+    Value *Select = Builder.CreateSelect(Br->getCondition(),
+                                         Phi->getIncomingValueForBlock(Br->getSuccessor(0)),
+                                         Phi->getIncomingValueForBlock(Br->getSuccessor(1)),
+                                         Phi->getName() + ".select");
+    Phi->replaceAllUsesWith(Select);
+    Phi->eraseFromParent();
+    Builder.CreateBr(Br->getSuccessor(0)->getTerminator()->getSuccessor(0));
+    Br->eraseFromParent();
+}
+
+namespace {
+class VecOptDiagnosePass : public PassInfoMixin<VecOptDiagnosePass> {
+public:
+  // <<< --- ULTIMATE DEBUG VERSION of run() --- >>>
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
+    errs() << "[Debug] Running VecOptDiagnosePass on function: " << F.getName() << "\n";
+
+    LoopInfo *LI = nullptr;
+    bool restrictToLoops = false;
+
+    if (auto *LoopAnalysisResult = FAM.getCachedResult<LoopAnalysis>(F)) {
+      LI = LoopAnalysisResult;
+      if (!LI->empty()) {
+        restrictToLoops = true;
+      }
+    }
+
+    errs() << "[Debug] Loop restriction is " << (restrictToLoops ? "ON" : "OFF") << ".\n";
+
+    bool IRWasModified = false;
+    std::vector<std::pair<BranchInst*, PHINode*>> Candidates;
+
+    for (BasicBlock &BB : F) {
+      errs() << "[Debug] Visiting Basic Block: " << BB.getName() << "\n";
+
+      if (restrictToLoops && LI) {
+          bool isInLoop = LI->getLoopFor(&BB) != nullptr;
+          errs() << "[Debug]   - Is in loop? " << (isInLoop ? "Yes" : "No") << ". ";
+          if (!isInLoop) {
+              errs() << "Skipping.\n";
+              continue;
+          }
+          errs() << "Processing.\n";
+      }
+
+      if (auto *Br = dyn_cast<BranchInst>(BB.getTerminator())) {
+        errs() << "[Debug]   - Terminator is a BranchInst. ";
+        BasicBlock *ThenBB = nullptr, *ElseBB = nullptr, *MergeBB = nullptr;
+        PHINode *Phi = nullptr;
+        if (findDiamond(Br, ThenBB, ElseBB, MergeBB, Phi)) {
+          bool armsArePure = isSideEffectFree(ThenBB) && isSideEffectFree(ElseBB);
+          if (EnableRewrite && armsArePure) {
+            Candidates.push_back({Br, Phi});
+          } else {
+            printLoc(F.getName(), *Br);
+            errs() << "branch-diamond -> merge '" << MergeBB->getName() << "'; "
+                 << (armsArePure ? "candidate for if->select.\n"
+                                 : "NOT safe to if-convert (side effects).\n");
+          }
+        }
+      } else {
+         errs() << "[Debug]   - Terminator is not a BranchInst.\n";
+      }
+    }
+
+    for (auto const& [Br, Phi] : Candidates) {
+      errs() << "[VecOpt][rewrite] Performing if-conversion at ";
+      printLoc(F.getName(), *Br);
+      errs() << "\n";
+      doIfConversion(Br, Phi);
+      IRWasModified = true;
+    }
+
+    if (IRWasModified) {
+      return PreservedAnalyses::none();
+    }
+    return PreservedAnalyses::all();
+  }
+};
+} // namespace
+
+PassPluginLibraryInfo getVecOptPluginInfo() {
+  return {
+    LLVM_PLUGIN_API_VERSION, "VecOpt", "0.8-debug",
+    [](PassBuilder &PB) {
+      PB.registerPipelineParsingCallback(
+        [&](StringRef Name, FunctionPassManager &FPM,
+            ArrayRef<PassBuilder::PipelineElement>) {
+          if (Name == "veco-diagnose") {
+            FPM.addPass(VecOptDiagnosePass());
+            return true;
+          }
+          return false;
+        });
+    }
+  };
+}
+
+extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
+llvmGetPassPluginInfo() {
+  return getVecOptPluginInfo();
+}
