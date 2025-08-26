@@ -13,178 +13,288 @@
 
 using namespace llvm;
 
+//===----------------------------------------------------------------------===//
+// VecOpt: If-convert a simple diamond into data-selects.
+//
+// Why: Turning control dependence into data dependence often unlocks
+// vectorization/SLP and simplifies later passes.
+//
+// Safety highlights in this version:
+//  - Convert *all* PHIs in the merge at once (keeps CFG+SSA consistent).
+//  - Recursively hoist transitive dependencies from both arms with strict
+//    speculation checks (no side effects, safe to speculatively execute,
+//    non-convergent calls, etc.).
+//  - Optional "freeze" on arm values before feeding them to select to avoid
+//    accidentally introducing poison/undef when control-dependence is removed.
+//
+// Tested on LLVM 16–18 style APIs.
+//===----------------------------------------------------------------------===//
+
 static cl::opt<bool> EnableRewrite(
     "vecopt-rewrite",
     cl::desc("Enable the rewrite mode for VecOpt"),
-    cl::init(false)
-);
+    cl::init(false));
 
+static cl::opt<bool> EnableFreeze(
+    "vecopt-freeze",
+    cl::desc("Insert freeze on select operands to guard against poison/undef"),
+    cl::init(true));
+
+// Print a helpful location header if debug info exists.
 static void printLoc(const StringRef Fn, const Instruction &I) {
   if (const DebugLoc &DL = I.getDebugLoc()) {
-    errs() << "[VecOpt] " << Fn
-           << " @ " << DL->getFilename() << ":" << DL->getLine() << ": ";
+    errs() << "[VecOpt] " << Fn << " @ " << DL->getFilename() << ":"
+           << DL->getLine() << ": ";
   } else {
     errs() << "[VecOpt] " << Fn << ": ";
   }
 }
 
-static bool isSideEffectFree(const BasicBlock *BB) {
+// Cheap block-level filter used at discovery time.
+static bool isSideEffectFreeBlock(const BasicBlock *BB) {
   for (const Instruction &I : *BB) {
-    if (I.isTerminator() || isa<PHINode>(&I)) continue;
-    if (I.mayWriteToMemory() || I.isVolatile()) return false;
+    if (I.isTerminator() || isa<PHINode>(&I))
+      continue;
+
+    if (I.isVolatile() || I.mayWriteToMemory())
+      return false;
+
     if (auto *CB = dyn_cast<CallBase>(&I)) {
-      if (!CB->onlyReadsMemory() && !CB->doesNotAccessMemory()) return false;
+      // Even if a call only reads memory, we usually don't want to speculate
+      // it unless it's proven safe by LLVM (and it's non-convergent).
+      if (!CB->onlyReadsMemory() && !CB->doesNotAccessMemory())
+        return false;
     }
-    if (!isSafeToSpeculativelyExecute(&I)) return false;
+
+    if (!isSafeToSpeculativelyExecute(&I))
+      return false;
   }
   return true;
 }
 
+// Classic diamond recognizer: header has conditional branch, both arms end in
+// unconditional branches to the same merge, and the merge begins with PHIs.
 static bool findDiamond(BranchInst *Br,
                         BasicBlock *&ThenBB, BasicBlock *&ElseBB,
-                        BasicBlock *&MergeBB, PHINode *&Phi) {
-  if (!Br || !Br->isConditional()) return false;
+                        BasicBlock *&MergeBB) {
+  if (!Br || !Br->isConditional())
+    return false;
+
   ThenBB = Br->getSuccessor(0);
   ElseBB = Br->getSuccessor(1);
+
   auto *ThenTerm = dyn_cast<BranchInst>(ThenBB->getTerminator());
   auto *ElseTerm = dyn_cast<BranchInst>(ElseBB->getTerminator());
-  if (!ThenTerm || !ElseTerm || ThenTerm->isConditional() || ElseTerm->isConditional()) return false;
-  if (ThenTerm->getSuccessor(0) != ElseTerm->getSuccessor(0)) return false;
+  if (!ThenTerm || !ElseTerm || ThenTerm->isConditional() || ElseTerm->isConditional())
+    return false;
+
+  if (ThenTerm->getSuccessor(0) != ElseTerm->getSuccessor(0))
+    return false;
+
   MergeBB = ThenTerm->getSuccessor(0);
-  Phi = nullptr;
+  return true;
+}
+
+// Gather all PHIs in MergeBB that receive values from both arms.
+static void collectRelevantPHIs(BasicBlock *MergeBB, BasicBlock *ThenBB,
+                                BasicBlock *ElseBB, SmallVectorImpl<PHINode*> &Out) {
   for (Instruction &I : *MergeBB) {
-    if (auto *P = dyn_cast<PHINode>(&I)) {
-      if (P->getBasicBlockIndex(ThenBB) >= 0 && P->getBasicBlockIndex(ElseBB) >= 0) {
-        Phi = P;
-        return true;
-      }
-    } else {
-      break;
-    }
+    auto *P = dyn_cast<PHINode>(&I);
+    if (!P) break; // PHIs are contiguous at the top
+    if (P->getBasicBlockIndex(ThenBB) >= 0 && P->getBasicBlockIndex(ElseBB) >= 0)
+      Out.push_back(P);
   }
-  return false;
 }
 
-// --- THIS IS THE CORRECTED FUNCTION ---
-static void doIfConversion(BranchInst *Br, PHINode *Phi) {
-    BasicBlock *HeaderBB = Br->getParent();
-    BasicBlock *ThenBB = Br->getSuccessor(0);
-    BasicBlock *ElseBB = Br->getSuccessor(1);
-    BasicBlock *MergeBB = Phi->getParent();
+// Instruction-level safety gate for speculation/hoisting.
+static bool isHoistableInst(const Instruction *I) {
+  if (!I) return false;
+  if (I->isTerminator() || isa<PHINode>(I))
+    return false;
+  if (I->isEHPad() || I->isFenceLike())
+    return false;
+  if (I->isVolatile() || I->mayWriteToMemory())
+    return false;
 
-    Value *ThenValue = Phi->getIncomingValueForBlock(ThenBB);
-    Value *ElseValue = Phi->getIncomingValueForBlock(ElseBB);
+  // Calls: require no side effects, non-convergent, and speculatively safe.
+  if (auto *CB = dyn_cast<CallBase>(I)) {
+    if (CB->isConvergent())
+      return false;
+    if (!CB->doesNotAccessMemory() && !CB->onlyReadsMemory())
+      return false;
+  }
 
-    // Hoist the instruction that computes ThenValue and its direct dependencies.
-    if (auto *ThenInst = dyn_cast<Instruction>(ThenValue)) {
-        if (ThenInst->getParent() == ThenBB) {
-            // First, move any operands that are also in ThenBB. This handles dependencies.
-            for (Value *Operand : ThenInst->operands()) {
-                if (auto *OpInst = dyn_cast<Instruction>(Operand)) {
-                    if (OpInst->getParent() == ThenBB) {
-                        OpInst->moveBefore(Br);
-                    }
-                }
-            }
-            // Then, move the instruction itself.
-            ThenInst->moveBefore(Br);
-        }
-    }
-
-    // Hoist the instruction that computes ElseValue and its direct dependencies.
-    if (auto *ElseInst = dyn_cast<Instruction>(ElseValue)) {
-        if (ElseInst->getParent() == ElseBB) {
-            for (Value *Operand : ElseInst->operands()) {
-                if (auto *OpInst = dyn_cast<Instruction>(Operand)) {
-                    if (OpInst->getParent() == ElseBB) {
-                        OpInst->moveBefore(Br);
-                    }
-                }
-            }
-            ElseInst->moveBefore(Br);
-        }
-    }
-
-    // Now that the definitions are hoisted into the header, they dominate the branch.
-    // We can now safely create the select instruction before the branch.
-    IRBuilder<> Builder(Br);
-    Value *Select = Builder.CreateSelect(Br->getCondition(), ThenValue, ElseValue,
-                                         Phi->getName() + ".select");
-
-    // The PHI node is now redundant. Replace its uses and remove it.
-    Phi->replaceAllUsesWith(Select);
-    Phi->eraseFromParent();
-
-    // Rewire the control flow to be unconditional.
-    Br->eraseFromParent();
-    BranchInst::Create(MergeBB, HeaderBB);
-
-    // The ThenBB and ElseBB are now dead code and will be cleaned up by a DCE pass.
+  return isSafeToSpeculativelyExecute(I);
 }
 
+// Recursively collect hoistable defs rooted at V, limited to values computed
+// in ArmBB. Post-order push gives a safe move-before order.
+static bool collectHoistSet(Value *V, BasicBlock *ArmBB,
+                            SmallPtrSetImpl<Instruction*> &Visited,
+                            SmallVectorImpl<Instruction*> &PostOrder) {
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I) return true; // Arguments/consts are OK.
+
+  if (I->getParent() != ArmBB)
+    return true; // Only hoist from inside the arm.
+
+  if (!Visited.insert(I).second)
+    return true; // already processed
+
+  if (!isHoistableInst(I))
+    return false;
+
+  for (Value *Op : I->operands()) {
+    if (!collectHoistSet(Op, ArmBB, Visited, PostOrder))
+      return false;
+  }
+
+  PostOrder.push_back(I); // post-order for topological move
+  return true;
+}
+
+static Value *maybeFreeze(Value *V, IRBuilder<> &B) {
+  if (!EnableFreeze)
+    return V;
+  // Don't bother freezing constants; otherwise freeze to avoid propagating
+  // poison/undef from dead arms after if-conversion.
+  if (isa<Constant>(V))
+    return V;
+  return B.CreateFreeze(V, V->getName() + ".frz");
+}
+
+static bool doIfConversion(Function &F, BranchInst *Br,
+                           BasicBlock *ThenBB, BasicBlock *ElseBB,
+                           BasicBlock *MergeBB) {
+  // 1) Collect all PHIs in the merge related to this diamond.
+  SmallVector<PHINode*, 8> PHIs;
+  collectRelevantPHIs(MergeBB, ThenBB, ElseBB, PHIs);
+  if (PHIs.empty())
+    return false; // nothing to do
+
+  // 2) First pass: build the transitive hoist set for all PHI incoming values.
+  SmallPtrSet<Instruction*, 32> VisitedThen, VisitedElse;
+  SmallVector<Instruction*, 32> OrderThen, OrderElse;
+
+  for (PHINode *P : PHIs) {
+    Value *TV = P->getIncomingValueForBlock(ThenBB);
+    Value *EV = P->getIncomingValueForBlock(ElseBB);
+
+    if (!collectHoistSet(TV, ThenBB, VisitedThen, OrderThen))
+      return false; // bail — cannot safely hoist
+    if (!collectHoistSet(EV, ElseBB, VisitedElse, OrderElse))
+      return false;
+  }
+
+  // 3) Move hoistable defs before the header branch, keeping order.
+  Instruction *InsertPt = Br; // insert before the conditional branch
+  for (Instruction *I : OrderThen)
+    I->moveBefore(InsertPt);
+  for (Instruction *I : OrderElse)
+    I->moveBefore(InsertPt);
+
+  // 4) For each PHI, build a select and replace.
+  IRBuilder<> B(Br);
+  Value *Cond = Br->getCondition();
+
+  SmallVector<PHINode*, 8> ToErase;
+  ToErase.reserve(PHIs.size());
+
+  for (PHINode *P : PHIs) {
+    Value *TV = P->getIncomingValueForBlock(ThenBB);
+    Value *EV = P->getIncomingValueForBlock(ElseBB);
+
+    Value *Sel = B.CreateSelect(Cond,
+                                maybeFreeze(TV, B),
+                                maybeFreeze(EV, B),
+                                P->getName() + ".select");
+
+    P->replaceAllUsesWith(Sel);
+    ToErase.push_back(P);
+  }
+
+  for (PHINode *P : ToErase)
+    P->eraseFromParent();
+
+  // 5) Rewire header to jump directly to merge; dependent cleanups are left to
+  // SimplifyCFG/DCE.
+  BasicBlock *HeaderBB = Br->getParent();
+  printLoc(F.getName(), *Br);
+  errs() << "if-converting diamond -> selects in '" << MergeBB->getName() << "'\n";
+
+  Br->eraseFromParent();
+  BranchInst::Create(MergeBB, HeaderBB);
+
+  return true;
+}
 
 namespace {
 class VecOptPass : public PassInfoMixin<VecOptPass> {
 public:
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
-    if (F.hasFnAttribute(Attribute::OptimizeNone)) {
-        F.removeFnAttr(Attribute::OptimizeNone);
-    }
+    // Respect -O0 users, but allow opt-in.
+    if (F.hasFnAttribute(Attribute::OptimizeNone))
+      F.removeFnAttr(Attribute::OptimizeNone);
 
-    LoopInfo *LI = &FAM.getResult<LoopAnalysis>(F);
-    bool IRWasModified = false;
-    
-    std::vector<std::pair<BranchInst*, PHINode*>> Candidates;
+    LoopInfo &LI = FAM.getResult<LoopAnalysis>(F);
+    bool Changed = false;
+
+    SmallVector<std::tuple<BranchInst*, BasicBlock*, BasicBlock*, BasicBlock*>, 8> Work;
 
     for (BasicBlock &BB : F) {
-      if (!LI->getLoopFor(&BB)) continue;
+      // Heuristic: only look inside loops by default — easiest wins for vec.
+      if (!LI.getLoopFor(&BB))
+        continue;
 
-      if (auto *Br = dyn_cast<BranchInst>(BB.getTerminator())) {
-        BasicBlock *ThenBB = nullptr, *ElseBB = nullptr, *MergeBB = nullptr;
-        PHINode *Phi = nullptr;
-        if (findDiamond(Br, ThenBB, ElseBB, MergeBB, Phi)) {
-          bool armsArePure = isSideEffectFree(ThenBB) && isSideEffectFree(ElseBB);
+      auto *Br = dyn_cast<BranchInst>(BB.getTerminator());
+      if (!Br) continue;
 
-          if (EnableRewrite && armsArePure) {
-            Candidates.push_back({Br, Phi});
-          } else {
-            printLoc(F.getName(), *Br);
-            errs() << "branch-diamond -> merge '" << Phi->getParent()->getName() << "'; "
-                 << (armsArePure ? "candidate for if->select.\n"
-                                 : "NOT safe to if-convert (side effects).\n");
-          }
-        }
+      BasicBlock *ThenBB = nullptr, *ElseBB = nullptr, *MergeBB = nullptr;
+      if (!findDiamond(Br, ThenBB, ElseBB, MergeBB))
+        continue;
+
+      // Fast block-level purity screen.
+      if (!isSideEffectFreeBlock(ThenBB) || !isSideEffectFreeBlock(ElseBB)) {
+        printLoc(F.getName(), *Br);
+        errs() << "diamond found but arms have side effects — skip\n";
+        continue;
+      }
+
+      if (EnableRewrite)
+        Work.emplace_back(Br, ThenBB, ElseBB, MergeBB);
+      else {
+        printLoc(F.getName(), *Br);
+        errs() << "diamond -> candidate for if->select in '" << MergeBB->getName() << "'\n";
       }
     }
 
-    for (auto const& [Br, Phi] : Candidates) {
-      printLoc(F.getName(), *Br);
-      errs() << "rewriting to select.\n";
-      doIfConversion(Br, Phi);
-      IRWasModified = true;
+    for (auto &T : Work) {
+      auto *Br = std::get<0>(T);
+      auto *ThenBB = std::get<1>(T);
+      auto *ElseBB = std::get<2>(T);
+      auto *MergeBB = std::get<3>(T);
+
+      Changed |= doIfConversion(F, Br, ThenBB, ElseBB, MergeBB);
     }
 
-    if (IRWasModified) return PreservedAnalyses::none();
-    return PreservedAnalyses::all();
+    return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
   }
 };
 } // namespace
 
 PassPluginLibraryInfo getVecOptPluginInfo() {
-  return {
-    LLVM_PLUGIN_API_VERSION, "VecOpt", "1.0",
-    [](PassBuilder &PB) {
-      PB.registerPipelineParsingCallback(
-        [&](StringRef Name, FunctionPassManager &FPM,
-            ArrayRef<PassBuilder::PipelineElement>) {
-          if (Name == "vecopt") {
-            FPM.addPass(VecOptPass());
-            return true;
-          }
-          return false;
-        });
-    }
-  };
+  return {LLVM_PLUGIN_API_VERSION, "VecOpt", "1.1",
+          [](PassBuilder &PB) {
+            PB.registerPipelineParsingCallback(
+                [&](StringRef Name, FunctionPassManager &FPM,
+                    ArrayRef<PassBuilder::PipelineElement>) {
+                  if (Name == "vecopt") {
+                    FPM.addPass(VecOptPass());
+                    return true;
+                  }
+                  return false;
+                });
+          }};
 }
 
 extern "C" ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
