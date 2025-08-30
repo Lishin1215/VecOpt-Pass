@@ -26,3 +26,5 @@ add_llvm_pass_plugin(VecOpt
 )
 
 target_include_directories(VecOpt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_subdirectory(veclangc)
+add_subdirectory(hybrid)

@@ -12,6 +12,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(veclangc
   main.cpp
   codegen.cpp
+  codegen_parser.cpp
+  preprocessor.cpp
+  lexer.h parser.h ast.h
 )
 
 llvm_map_components_to_libnames(LLVMLibs
@@ -20,6 +23,7 @@ llvm_map_components_to_libnames(LLVMLibs
   ScalarOpts Vectorize IPO
   Target MC CodeGen AsmPrinter
   Object Passes
+  native nativecodegen
 )
 
 target_include_directories(veclangc PRIVATE ${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
