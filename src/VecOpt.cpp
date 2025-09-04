@@ -88,6 +88,14 @@ static bool isSideEffectFreeBlock(const BasicBlock *BB) {
   return true;
 }
 
+static bool isVecFriendlyTy(Type *T) {
+  if (auto *IT = dyn_cast<IntegerType>(T)) {
+    unsigned W = IT->getBitWidth();
+    return W == 8 || W == 16 || W == 32; 
+  }
+  return T->isFloatTy() || T->isDoubleTy();
+}
+
 // Some LLVM builds don’t expose hasNPredecessors(); count preds ourselves.
 static bool hasExactlyNPreds(const BasicBlock *BB, unsigned N) {
   unsigned C = 0;
@@ -180,11 +188,11 @@ static bool containsLoad(ArrayRef<Instruction*> Seq) {
   return false;
 }
 
-static bool isVecFriendlyTy(Type *T) {
-  if (auto *IT = dyn_cast<IntegerType>(T))
-    return IT->getBitWidth() == 32; // i32 only
-  return T->isFloatTy() || T->isDoubleTy();
-}
+// static bool isVecFriendlyTy(Type *T) {
+//   if (auto *IT = dyn_cast<IntegerType>(T))
+//     return IT->getBitWidth() == 32; // i32 only
+//   return T->isFloatTy() || T->isDoubleTy();
+// }
 
 // Skip highly biased branches (select would execute both arms)
 static bool isHighlyBiased(BranchInst *Br, double Thresh = 8.0) {

@@ -4,7 +4,7 @@
 
 enum class Tok {
   Eof, Ident, Number,
-  KwInt, KwConst, KwReturn, KwFor, KwIf, KwElse,
+  KwInt, KwConst, KwReturn, KwFor, KwIf, KwElse, KwWhile,
   Star, Amp, LParen, RParen, LBrace, RBrace, LBracket, RBracket,
   Comma, Semicolon, Assign,
   Plus, Minus, Mul, Div, Mod,
@@ -50,6 +50,7 @@ public:
       if (w=="for") return {Tok::KwFor,w};
       if (w=="if") return {Tok::KwIf,w};
       if (w=="else") return {Tok::KwElse,w};
+      if (w=="while")   return {Tok::KwWhile, w};
       return {Tok::Ident,w};
     }
     if (isdigit((unsigned char)c)) {
@@ -67,7 +68,7 @@ public:
 
     ++i;
     switch(c){
-      case '*': return {Tok::Star,"*"};
+      // case '*': return {Tok::Star,"*"};
       case '&': return {Tok::Amp,"&"};
       case '(': return {Tok::LParen,"("};
       case ')': return {Tok::RParen,")"};
@@ -84,6 +85,7 @@ public:
       case '%': return {Tok::Mod,"%"}; 
       case '<': return {Tok::Lt,"<"};
       case '>': return {Tok::Gt,">"};
+      case '*': return {Tok::Mul, "*"};
       default:  return {Tok::Eof,""};
     }
   }

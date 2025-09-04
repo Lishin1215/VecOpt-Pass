@@ -16,3 +16,7 @@ build/
 Thumbs.db
 
 core.\*
+build/
+third_party/
+*/build/*
+results/
