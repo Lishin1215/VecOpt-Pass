@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-// --- Expressions (運算式) ---
+// --- Expressions ---
 struct Expr { virtual ~Expr() = default; };
 
 struct NumberExpr : Expr {
@@ -23,7 +23,7 @@ struct IndexExpr : Expr {
         : base(std::move(b)), idx(std::move(i)) {}
 };
 
-enum class BinOp { Add, Sub, Mul, Div, Mod, LT, LE, GT, GE, EQ, NE };
+enum class BinOp { Add, Sub, Mul, Div, Mod, LT, LE, GT, GE, EQ, NE, And, Or, Xor, Shl, Shr };
 
 struct BinExpr : Expr {
     BinOp op;
@@ -46,7 +46,7 @@ struct AssignExpr : Expr {
         : lhs(std::move(l)), rhs(std::move(r)) {}
 };
 
-// --- Statements (語句) ---
+// --- Statements ---
 struct Stmt { virtual ~Stmt() = default; };
 
 struct DeclStmt : Stmt {

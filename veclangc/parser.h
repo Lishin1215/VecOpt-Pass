@@ -25,7 +25,7 @@ class Parser {
         if (is(Tok::Ident)) {
             std::string name = tok.text;
             bump();
-            if (is(Tok::LParen)) { // 函式呼叫
+            if (is(Tok::LParen)) { // function call
                 bump();
                 std::vector<std::unique_ptr<Expr>> args;
                 if (!is(Tok::RParen)) {
@@ -36,7 +36,7 @@ class Parser {
                 expect(Tok::RParen, ") expected after function arguments");
                 return std::make_unique<CallExpr>(name, std::move(args));
             }
-            if (is(Tok::LBracket)) { // 陣列索引
+            if (is(Tok::LBracket)) { // array indexing
                 bump();
                 auto e = parseExpr();
                 expect(Tok::RBracket, "] expected");
@@ -55,10 +55,14 @@ class Parser {
 
     int prec(Tok k) {
         switch (k) {
-        case Tok::Mul: case Tok::Div: return 5;
-        case Tok::Plus: case Tok::Minus: return 4;
-        case Tok::Lt: case Tok::Gt: case Tok::Le: case Tok::Ge: return 3;
-        case Tok::EqEq: case Tok::Ne: return 2;
+            case Tok::Mul: case Tok::Div:                return 70;
+            case Tok::Plus: case Tok::Minus:             return 60;
+            case Tok::Shl:  case Tok::Shr:               return 50;
+            case Tok::Lt: case Tok::Gt: case Tok::Le: case Tok::Ge: return 40;
+            case Tok::EqEq: case Tok::Ne:                return 30;
+            case Tok::Amp:                               return 20; // &
+            case Tok::Caret:                             return 15; // ^
+            case Tok::Pipe:                              return 10; // |
         default: return -1;
         }
     }
@@ -70,6 +74,11 @@ class Parser {
         case Tok::Lt: return BinOp::LT;   case Tok::Le: return BinOp::LE;
         case Tok::Gt: return BinOp::GT;   case Tok::Ge: return BinOp::GE;
         case Tok::EqEq: return BinOp::EQ; case Tok::Ne: return BinOp::NE;
+        case Tok::Amp:   return BinOp::And;
+        case Tok::Pipe:  return BinOp::Or;
+        case Tok::Caret: return BinOp::Xor;
+        case Tok::Shl:   return BinOp::Shl;
+        case Tok::Shr:   return BinOp::Shr;
         default: throw std::runtime_error("bad binary operator");
         }
     }
@@ -127,10 +136,10 @@ class Parser {
         // else?
         if (is(Tok::KwElse)) {
             bump();
-            // 簡化：else body 當成另一個 IfStmt with const true
+            // Simplified: else body is treated as another IfStmt with const true
             std::vector<std::unique_ptr<Stmt>> elseStmts;
             elseStmts.push_back(parseStmt());
-            // TODO: AST 應該加 else 分支，這裡先忽略
+            // TODO: AST should add else branch, currently ignored here
         }
         return std::make_unique<IfStmt>(std::move(cond), std::move(thenStmts));
     }

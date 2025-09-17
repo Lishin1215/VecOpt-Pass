@@ -42,6 +42,16 @@ struct CodeGenVisitor {
                 case BinOp::Mul: return B.CreateMul(L, R, "multmp");
                 case BinOp::Div: return B.CreateSDiv(L, R, "divtmp");
                 case BinOp::LT:  return B.CreateICmpSLT(L, R, "cmptmp");
+                case BinOp::LE: return B.CreateICmpSLE(L, R, "cmple");
+                case BinOp::GT: return B.CreateICmpSGT(L, R, "cmpgt");
+                case BinOp::GE: return B.CreateICmpSGE(L, R, "cmpge");
+                case BinOp::EQ: return B.CreateICmpEQ (L, R, "cmpeq");
+                case BinOp::NE: return B.CreateICmpNE (L, R, "cmpne");
+                case BinOp::And: return B.CreateAnd(L, R, "andtmp");
+                case BinOp::Or:  return B.CreateOr (L, R, "ortmp");
+                case BinOp::Xor: return B.CreateXor(L, R, "xortmp");
+                case BinOp::Shl: return B.CreateShl(L, R, "shltmp");
+                case BinOp::Shr: return B.CreateLShr(L, R, "lsrtmp");
                 default: throw std::runtime_error("unsupported binary operator");
             }
         }
@@ -155,7 +165,38 @@ struct CodeGenVisitor {
           for (auto &stmt : block->stmts) {
               visit(stmt.get());
           }
-       } else {
+       } else if (auto* ifs = dynamic_cast<IfStmt*>(s)) {
+            // 生成條件值
+            Value* CondV = visit(ifs->cond.get());
+            // 若不是 i1，轉成 bool：v != 0
+            if (!CondV->getType()->isIntegerTy(1)) {
+                CondV = B.CreateICmpNE(
+                    CondV,
+                    ConstantInt::get(CondV->getType(), 0),
+                    "tobool"
+                );
+            }
+
+            // 建基本區塊：then 與 end
+            BasicBlock* ThenBB = BasicBlock::Create(M.getContext(), "if.then", currentFunction);
+            BasicBlock* EndBB  = BasicBlock::Create(M.getContext(), "if.end",  currentFunction);
+
+            // 目前沒有 else，所以 false 直接跳到 EndBB
+            B.CreateCondBr(CondV, ThenBB, EndBB);
+
+            // 生成 then 區塊
+            B.SetInsertPoint(ThenBB);
+            for (auto& st : ifs->thenStmts) {
+                visit(st.get());
+            }
+            // 如果 then 區塊沒有終結（例如沒有 return/branch），補一個跳到 EndBB
+            if (!B.GetInsertBlock()->getTerminator()) {
+                B.CreateBr(EndBB);
+            }
+
+            // 繼續在 end 區塊插入
+            B.SetInsertPoint(EndBB);
+        } else {
            throw std::runtime_error("unknown statement type in codegen");
        }
    }

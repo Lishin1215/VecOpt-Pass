@@ -9,6 +9,7 @@ enum class Tok {
   Comma, Semicolon, Assign,
   Plus, Minus, Mul, Div, Mod,
   Lt, Gt, Le, Ge, EqEq, Ne,
+  Shl, Shr, Pipe, Caret,
   PlusPlus
 };
 
