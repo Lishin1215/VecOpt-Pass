@@ -34,7 +34,7 @@ if [ ! -f "$VECOPT_SO" ]; then
 fi
 
 # 通用編譯旗標
-CC="clang-18"
+CC="clang"
 CFLAGS="-O3 -march=native -ffast-math -fno-exceptions -fno-rtti -std=gnu89"
 LDFLAGS="-lm"
 

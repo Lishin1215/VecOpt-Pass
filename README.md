@@ -45,8 +45,8 @@ With the foundation in place, the next goal is to expand the pass's capabilities
 ## How to Use
 
 1.  **Requirements**:
-    - `clang-18`
-    - `llvm-18`
+    - `clang`
+    - `llvm`
     - `cmake`
 
 2.  **Execution**:

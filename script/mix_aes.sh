@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 THIRD_PARTY="${REPO_ROOT}/third_party"
 MIX_DIR="${REPO_ROOT}/veclangc/mix_3"
-VECC="${REPO_ROOT}/veclangc/build/veclangc"
+VECC="${REPO_ROOT}/build/veclangc/veclangc"
 
 TINY_DIR="${THIRD_PARTY}/tiny-AES-c"
 

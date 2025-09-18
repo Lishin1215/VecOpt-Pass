@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build/mix_test"
 VECLANGC="${VECLANGC:-$ROOT/veclangc/veclangc}"
-CLANG="${CLANG:-clang-18}"
-VECOPT_SO="${VECOPT_SO:-$ROOT/build/VecOpt.so}"
+CLANG="${CLANG:-clang}"
+VECOPT_SO="${VECOPT_SO:-$ROOT/build/VecOpt.dylib}"
 RESULTS="$ROOT/results"
 mkdir -p "$BUILD" "$RESULTS"
 

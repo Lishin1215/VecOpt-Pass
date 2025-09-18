@@ -26,13 +26,13 @@ echo ""
 
 # --- 2. Generate LLVM IR from C source ---
 echo "--- (2/5) Generating LLVM IR from C source... ---"
-clang-18 -O0 -g -emit-llvm -S "$SRC_FILE" -o sad.O0.ll
+clang -O0 -g -emit-llvm -S "$SRC_FILE" -o sad.O0.ll
 echo "Successfully generated sad.O0.ll"
 echo ""
 
 # --- 3. Run mem2reg Pass ---
 echo "--- (3/5) Running mem2reg Pass... ---"
-opt-18 -passes=mem2reg -S sad.O0.ll -o sad.mem2reg.ll
+opt -passes=mem2reg -S sad.O0.ll -o sad.mem2reg.ll
 echo "Successfully generated sad.mem2reg.ll"
 echo ""
 
@@ -47,13 +47,13 @@ echo "--- (5/5) Running the VecOpt Pass... ---"
 
 # Diagnose Mode
 echo "--- [Diagnose Mode] ---"
-opt-18 -load-pass-plugin="$PASS_PLUGIN_SO" -passes=vecopt -disable-output sad.mem2reg.ll
+opt -load-pass-plugin="$PASS_PLUGIN_SO" -passes=vecopt -disable-output sad.mem2reg.ll
 
 echo ""
 
 # Rewrite Mode
 echo "--- [Rewrite Mode] ---"
-opt-18 -load-pass-plugin="$PASS_PLUGIN_SO" -passes=vecopt -vecopt-rewrite sad.mem2reg.ll -S -o sad.rewritten.ll
+opt -load-pass-plugin="$PASS_PLUGIN_SO" -passes=vecopt -vecopt-rewrite sad.mem2reg.ll -S -o sad.rewritten.ll
 echo "Rewrite complete! Result saved to sad.rewritten.ll"
 echo ""
 
