@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 專案路徑
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIBENCH_DIR="${ROOT_DIR}/third_party/mibench"
 BUILD_DIR="${ROOT_DIR}/build"
@@ -10,20 +9,19 @@ RESULTS_DIR="${ROOT_DIR}/results"
 BASICMATH_DIR="${MIBENCH_DIR}/automotive/basicmath"
 OUT_DIR="${BUILD_DIR}/basicmath"
 
-VECC="${ROOT_DIR}/veclangc/build/veclangc"
+VECC="${ROOT_DIR}/build/veclangc/veclangc"
 # CC=${CC:-clang}
 # CFLAGS=${CFLAGS:--O2}
 # LDFLAGS=${LDFLAGS:--lm}
-CC="clang-18"
+CC="clang"
 CFLAGS="-O3 -march=native -ffast-math -fno-exceptions -fno-rtti -std=gnu89"
 LDFLAGS="-lm"
 
 mkdir -p "${OUT_DIR}" "${RESULTS_DIR}"
 
-# 路徑
-SRC_KERNEL_V="${ROOT_DIR}/veclangc/mix_2/kernel_basicmath.c"      # veclangc: 你新加的檔
+SRC_KERNEL_V="${ROOT_DIR}/veclangc/mix_2/kernel_basicmath.c"     
 SRC_KERNEL_H="${ROOT_DIR}/veclangc/mix_2/kernel_basicmath.h"
-SRC_MAIN_REST="${ROOT_DIR}/veclangc/mix_2/basicmath_large_rest.c" # clang: 改寫後的 main
+SRC_MAIN_REST="${ROOT_DIR}/veclangc/mix_2/basicmath_large_rest.c"
 SRC_CUBIC="${BASICMATH_DIR}/cubic.c"
 SRC_RAD2DEG="${BASICMATH_DIR}/rad2deg.c"
 

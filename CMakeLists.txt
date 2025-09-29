@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Find LLVM (no overly strict patch-level requirement)
-find_package(LLVM 18 REQUIRED CONFIG)
+find_package(LLVM REQUIRED CONFIG)
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} in ${LLVM_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
@@ -41,4 +41,4 @@ target_include_directories(VecOpt PRIVATE
 # target_link_libraries(VecOpt PRIVATE ${REQ_LLVM_LIBS})
 
 add_subdirectory(veclangc)
-add_subdirectory(hybrid)
+# add_subdirectory(hybrid)

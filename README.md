@@ -64,6 +64,7 @@ Other scripts:
 
 - All third-party code is downloaded into `third_party/`.
 - Results and binaries are placed in `build/` and `results/`.
+- For more details, see comments in each script.
 
 ---
 
